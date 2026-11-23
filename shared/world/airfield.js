@@ -98,6 +98,14 @@ export function makeFlyablePlane() {
     );
     wheel.rotation.z = Math.PI / 2;
   }
+  // Wing guns sit outboard of the engines. The nose is local +Z.
+  const gunMounts = [];
+  for (const x of [-2.48, 2.48]) {
+    box(plane, x, 0.96, 1.02, 0.16, 0.14, 0.95, 0x243238);
+    box(plane, x, 0.96, 1.55, 0.09, 0.09, 0.18, 0xd5dee4);
+    gunMounts.push(new THREE.Vector3(x, 0.96, 1.7));
+  }
+  plane.userData.gunMounts = gunMounts;
   const noseWheel = cylinder(
     plane,
     0,

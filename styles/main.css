@@ -390,6 +390,68 @@ h1 em {
   margin: 3px 0 1px;
   font-size: 15px;
 }
+.flight-alert {
+  position: fixed;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.flight-alert::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.2;
+}
+.flight-alert.is-on::before {
+  animation: flight-alert-flash 1.25s ease-in-out 2;
+}
+.flight-alert.is-danger::before {
+  background: rgba(214, 64, 72, 0.42);
+}
+.flight-alert.is-safe::before {
+  background: rgba(46, 168, 96, 0.42);
+}
+.flight-alert p {
+  position: relative;
+  z-index: 1;
+  margin: 0 24px;
+  padding: 16px 28px;
+  border-radius: 22px;
+  background: #fffdf6;
+  color: #6d2430;
+  font-size: clamp(28px, 5vw, 52px);
+  font-weight: 800;
+  letter-spacing: -0.6px;
+  text-align: center;
+  box-shadow: 0 12px 40px #3a102033;
+}
+.flight-alert.is-safe p {
+  color: #145c34;
+}
+.flight-alert.is-calm::before,
+.flight-alert.is-calm.is-on::before {
+  animation: none;
+  opacity: 0.72;
+}
+@keyframes flight-alert-flash {
+  0% {
+    opacity: 0.15;
+  }
+  40% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.18;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flight-alert.is-on::before {
+    animation: none;
+    opacity: 0.72;
+  }
+}
 .rocket-status {
   position: absolute;
   top: 28px;

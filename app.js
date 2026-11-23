@@ -21,6 +21,7 @@ import { loadHorseNPC, Wildlife } from "./shared/world/wildlife.js";
 import { Leaves } from "./shared/world/leaves.js";
 import { Weather } from "./shared/world/weather.js";
 import { FlightHoops, FLIGHT_HOOPS } from "./shared/world/flight-hoops.js";
+import { FlightCombat } from "./shared/world/flight-combat.js";
 import { UI } from "./shared/components/ui.js";
 import { MobileControls } from "./shared/components/mobile-controls.js";
 import { destinations } from "./games/destinations.js";
@@ -166,6 +167,7 @@ class Game {
     this.plane = new FlyablePlane(town.group);
     this.weather = new Weather(town.group);
     this.flightHoops = new FlightHoops(town.group);
+    this.flightCombat = new FlightCombat(town.group);
     this.planeInteraction = this.interactions.register({
       id: "skybird-plane",
       area: "town",
@@ -421,6 +423,7 @@ class Game {
     if (this.coaster?.occupied) this.coaster.exit();
     if (this.spaceDive?.occupied) this.spaceDive.exit();
     if (this.waterPark?.occupied) this.waterPark.exit();
+    this.teddyWorld?.exitBoat();
     this.cornMaze?.exit();
     this.pickups.reset();
     this.player.setModel(this.characters.get(id));
@@ -447,6 +450,7 @@ class Game {
   }
   setMode(mode) {
     this.mode = mode;
+    if (this.teddyWorld) this.teddyWorld.hud.hidden = mode !== "playing" || !this.teddyWorld.boatBoarded;
     this.input.setEnabled(mode === "playing");
     if (mode !== "playing" && document.pointerLockElement)
       document.exitPointerLock();
@@ -514,6 +518,8 @@ class Game {
     if (this.area.id !== "town" || this.flying) return;
     this.flying = this.plane.enter(this.player);
     if (this.flying) {
+      this.flightCombat.endFlight();
+      this.hideFlightAlert();
       document.querySelector("#plane-controls").hidden = false;
       document.querySelector("#flight-status").hidden = false;
       this.input.clear();
@@ -524,11 +530,31 @@ class Game {
     if (!this.flying) return;
     this.plane.exit(this.player);
     this.flightHoops.update(this.player.position, false);
+    this.flightCombat.endFlight();
     this.flying = false;
     document.querySelector("#plane-controls").hidden = true;
     document.querySelector("#flight-status").hidden = true;
     this.input.clear();
     this.ui.toast("Skybird is parked and ready for your next flight.");
+  }
+  showFlightAlert(text, kind) {
+    const alert = document.querySelector("#flight-alert");
+    alert.classList.remove("is-danger", "is-safe", "is-calm", "is-on");
+    alert.classList.add(kind === "safe" ? "is-safe" : "is-danger");
+    if (this.calm) alert.classList.add("is-calm");
+    document.querySelector("#flight-alert-text").textContent = text;
+    alert.hidden = false;
+    void alert.offsetWidth;
+    alert.classList.add("is-on");
+    clearTimeout(this.flightAlertTimer);
+    this.flightAlertTimer = setTimeout(() => {
+      alert.hidden = true;
+    }, 2500);
+  }
+  hideFlightAlert() {
+    clearTimeout(this.flightAlertTimer);
+    const alert = document.querySelector("#flight-alert");
+    if (alert) alert.hidden = true;
   }
   startRocketJourney() {
     if (
@@ -687,6 +713,7 @@ class Game {
   enter(id, spawn) {
     const next = this.areas[id];
     if (!next) return;
+    this.teddyWorld?.exitBoat();
     this.waterPark?.exit();
     this.spaceRace?.exit();
     this.spaceTube?.exit();
@@ -751,7 +778,10 @@ class Game {
     this.interactionCooldown = Math.max(0, this.interactionCooldown - dt);
     let event = null;
     if (this.mode === "playing") {
-      if (this.spaceRace.occupied) {
+      if (this.teddyWorld.boatBoarded) {
+        this.teddyWorld.updateRide(dt);
+        this.ui.showPrompt(null);
+      } else if (this.spaceRace.occupied) {
         this.ui.showPrompt(null);
       } else if (this.spaceTube.occupied) {
         this.ui.showPrompt(null);
@@ -772,6 +802,22 @@ class Game {
           this.plane.gentleWeather = this.calm;
           this.plane.weatherTime = this.weather.time;
           const flight = this.plane.update(dt, this.input);
+          const combat = this.flightCombat.update(dt, this.plane);
+          if (combat.warning) this.showFlightAlert("Enemies incoming", "danger");
+          if (combat.escaped)
+            this.showFlightAlert(
+              "You managed to escape the enemy!",
+              "safe",
+            );
+          if (combat.shotDown) {
+            this.plane.reset();
+            this.player.position.copy(this.plane.model.position);
+            this.player.heading = this.plane.heading;
+            this.player.sync();
+            this.follow.reset(this.plane.cameraYaw());
+            this.flightHoops.update(this.plane.model.position, false);
+            this.hideFlightAlert();
+          }
           const crossedHoop = this.flightHoops.update(
             this.plane.model.position,
             true,
@@ -882,7 +928,8 @@ class Game {
       }
       if (this.mode !== "playing") return;
       this.spaceAlien.afterPlayer(dt);
-      if (this.spaceRace.occupied) this.spaceRace.updateCamera(dt);
+      if (this.teddyWorld.boatBoarded) this.teddyWorld.updateCamera(dt);
+      else if (this.spaceRace.occupied) this.spaceRace.updateCamera(dt);
       else if (this.spaceTube.occupied) this.spaceTube.updateCamera(dt);
       else if (this.spaceship.occupied) this.spaceship.updateCamera(dt);
       else if (this.waterPark.occupied) this.waterPark.updateCamera(dt);
@@ -971,7 +1018,7 @@ class Game {
       this.player.position.x > -42;
     this.renderer.toneMappingExposure = THREE.MathUtils.damp(
       this.renderer.toneMappingExposure,
-      inSpace ? 0.78 : inWaterPark ? 0.95 : inCoasterPark ? 0.86 : 1.25,
+      inSpace ? 0.78 : this.teddyWorld.boatBoarded ? 0.95 : inWaterPark ? 0.95 : inCoasterPark ? 0.86 : 1.25,
       3,
       dt,
     );
@@ -1063,6 +1110,13 @@ async function boot() {
     selected,
     horseResult.status === "fulfilled" ? horseResult.value : null,
   );
+  if (import.meta.env.DEV && new URLSearchParams(location.search).has("teddy-preview")) {
+    game.start();
+    game.player.teleport(game.teddyWorld.dockPos.x, game.teddyWorld.dockPos.z + 6);
+    game.follow.reset(0);
+    const { addTeddyChecks } = await import("./tests/teddy-browser-checks.js");
+    addTeddyChecks(game);
+  }
   if (import.meta.env.DEV && new URLSearchParams(location.search).has("water-park-preview")) {
     game.start();
     game.player.teleport(WATER_PARK_EXIT.x, WATER_PARK_EXIT.z + 7);
