@@ -10,6 +10,7 @@ import {
   FIRST_MOUNTAIN_PASS_Z,
   FlightCombat,
   PLAYER_HEALTH,
+  WAVE_COUNT,
   passedFirstMountain,
   reachedFlightEnding,
 } from "../shared/world/flight-combat.js";
@@ -60,6 +61,11 @@ test("enemies stay away until Skybird passes the first mountain", () => {
   const again = combat.update(1 / 30, plane);
   assert.equal(again.warning, false);
   assert.equal(combat.enemies.filter((enemy) => enemy.alive).length, 2);
+  const forward = new THREE.Vector3(0, 0, -1);
+  for (const enemy of combat.enemies) {
+    const ahead = enemy.position.clone().sub(plane.model.position).dot(forward);
+    assert.ok(ahead > 40, "enemy spawned behind Skybird");
+  }
 });
 
 test("Skybird has a machine gun on each wing and they fire while enemies live", () => {
@@ -158,6 +164,62 @@ test("enemy planes shoot, and a steady flight still reaches the north field", ()
   assert.equal(escaped, true);
   assert.ok(enemyShots > 0, "enemies never fired");
   assert.ok(combat.playerHealth > PLAYER_HEALTH / 2);
+});
+
+test("three waves of two planes come from the front and then stop", () => {
+  const combat = new FlightCombat(new THREE.Group());
+  const plane = fakePlane(-22, 48, -700);
+  plane.speed = 0;
+  const step = 1 / 30;
+  const fronts = [];
+  let lastWave = 0;
+  let campedBehind = false;
+  const forward = new THREE.Vector3(0, 0, -1);
+  for (let t = 0; t < 45; t += step) {
+    combat.update(step, plane);
+    if (combat.wave !== lastWave) {
+      lastWave = combat.wave;
+      const ahead = combat.enemies
+        .filter((enemy) => enemy.alive)
+        .map((enemy) =>
+          enemy.position.clone().sub(plane.model.position).dot(forward),
+        );
+      fronts.push(Math.min(...ahead));
+    }
+    for (const enemy of combat.enemies) {
+      if (!enemy.alive) continue;
+      const ahead = enemy.position.clone().sub(plane.model.position).dot(forward);
+      if (ahead < -30) campedBehind = true;
+    }
+    assert.ok(combat.enemies.filter((enemy) => enemy.alive).length <= 2);
+  }
+  assert.equal(combat.wave, WAVE_COUNT);
+  assert.equal(fronts.length, WAVE_COUNT);
+  assert.ok(fronts.every((ahead) => ahead > 40));
+  assert.equal(campedBehind, false);
+  assert.equal(
+    combat.enemies.filter((enemy) => enemy.alive).length,
+    0,
+  );
+  combat.update(1, plane);
+  assert.equal(combat.wave, WAVE_COUNT);
+});
+
+test("flying toward the incoming planes can shoot one down", () => {
+  const combat = new FlightCombat(new THREE.Group());
+  const plane = fakePlane(-22, 48, -700);
+  plane.speed = 28;
+  const step = 1 / 30;
+  let destroyed = 0;
+  for (let t = 0; t < 12; t += step) {
+    plane.model.position.z -= 28 * step;
+    const before = combat.enemies.map((enemy) => enemy.health);
+    combat.update(step, plane);
+    combat.enemies.forEach((enemy, index) => {
+      if (before[index] > 0 && enemy.health <= 0) destroyed += 1;
+    });
+  }
+  assert.ok(destroyed >= 1, "forward guns never hit an incoming plane");
 });
 
 test("standing still draws enemy fire without a quick shoot-down", () => {

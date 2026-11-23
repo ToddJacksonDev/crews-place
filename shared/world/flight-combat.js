@@ -8,14 +8,16 @@ import {
   PLANE_WORLD_LIMIT,
 } from "./airfield.js";
 
-// Enemies wait until Skybird is north of the first peak. Their shots are
-// intentionally wide so a steady flight is hard to lose.
+// Enemies wait until Skybird is north of the first peak, then come from the
+// front in three passes of two. Their shots are intentionally wide.
 export const ENEMY_PLANE_COUNT = 2;
+export const WAVE_COUNT = 3;
 export const PLAYER_HEALTH = 16;
 export const ENEMY_HEALTH = 8;
+const WAVE_GAP = 2.8;
 export const FIRST_MOUNTAIN_PASS_Z = MOUNTAINS[0].z - MOUNTAINS[0].radius;
 const PLAYER_HIT_RADIUS = 1.9;
-const ENEMY_HIT_RADIUS = 2.35;
+const ENEMY_HIT_RADIUS = 3.4;
 const GUN_CONVERGENCE = 28;
 const UP = new THREE.Vector3(0, 1, 0);
 
@@ -91,6 +93,11 @@ export class FlightCombat {
     this.parent = parent;
     this.time = 0;
     this.state = "idle";
+    this.wave = 0;
+    this.waveGap = 0;
+    this.waveForward = new THREE.Vector3(0, 0, -1);
+    this.waveRight = new THREE.Vector3(1, 0, 0);
+    this.waveSpeed = 16;
     this.playerHealth = PLAYER_HEALTH;
     this.gunTimer = 0;
     this.bullets = [];
@@ -124,8 +131,8 @@ export class FlightCombat {
         heading: Math.PI,
         health: ENEMY_HEALTH,
         cooldown: 2,
-        phase: "approach",
-        phaseTime: 0,
+        passHeading: 0,
+        age: 0,
         alive: false,
       };
     });
@@ -133,6 +140,8 @@ export class FlightCombat {
 
   endFlight() {
     this.state = "idle";
+    this.wave = 0;
+    this.waveGap = 0;
     this.playerHealth = PLAYER_HEALTH;
     this.gunTimer = 0;
     this.hideEnemies();
@@ -166,6 +175,7 @@ export class FlightCombat {
       this.endFlight();
       return result;
     }
+    this.advanceWave(dt, plane);
     if (reachedFlightEnding(position)) {
       result.escaped = true;
       this.state = "escaped";
@@ -180,29 +190,69 @@ export class FlightCombat {
     this.state = "fighting";
     this.playerHealth = PLAYER_HEALTH;
     this.gunTimer = 0;
+    this.wave = 0;
+    this.waveGap = 0;
+    this.spawnWave(plane);
+  }
+
+  spawnWave(plane) {
+    this.wave += 1;
+    this.waveGap = 0;
     const forward = new THREE.Vector3(
       Math.sin(plane.heading),
       0,
       Math.cos(plane.heading),
     );
     const right = new THREE.Vector3(forward.z, 0, -forward.x);
+    this.waveForward.copy(forward);
+    this.waveRight.copy(right);
+    // A fast Skybird still gets a few seconds to fire before the pair arrives.
+    this.waveSpeed = Math.max(10, 26 - Math.max(0, plane.speed ?? 0));
+    const passHeading = Math.atan2(-forward.x, -forward.z);
     for (const enemy of this.enemies) {
-      const spawn = plane.model.position
-        .clone()
-        .addScaledVector(forward, -34 - enemy.index * 14)
-        .addScaledVector(right, enemy.side * 18);
-      spawn.y = THREE.MathUtils.clamp(plane.model.position.y, 18, 60);
-      enemy.position.copy(this.openSpawn(spawn, enemy.side));
-      enemy.heading = plane.heading;
+      const lateral = enemy.side * 11;
+      const distance = 100 + enemy.index * 22;
+      let spot = null;
+      for (let step = 0; step < 5; step++) {
+        const candidate = plane.model.position
+          .clone()
+          .addScaledVector(forward, distance - step * 10)
+          .addScaledVector(right, lateral);
+        candidate.y = THREE.MathUtils.clamp(
+          plane.model.position.y + enemy.side * 3,
+          20,
+          60,
+        );
+        const clear = this.openSpawn(candidate, enemy.side);
+        if (!blocked(clear)) {
+          spot = clear;
+          break;
+        }
+      }
+      spot ??= plane.model.position.clone().addScaledVector(forward, 64);
+      enemy.position.copy(spot);
+      enemy.heading = passHeading;
+      enemy.passHeading = passHeading;
       enemy.health = ENEMY_HEALTH;
-      enemy.cooldown = 1.7 + enemy.index * 0.4;
-      enemy.phase = "approach";
-      enemy.phaseTime = 0;
+      enemy.cooldown = 0.55 + enemy.index * 0.3;
+      enemy.age = 0;
       enemy.alive = true;
       enemy.group.visible = true;
       enemy.group.position.copy(enemy.position);
       enemy.group.rotation.set(0, enemy.heading, 0);
     }
+  }
+
+  advanceWave(dt, plane) {
+    if (this.state !== "fighting") return;
+    if (reachedFlightEnding(plane.model.position)) return;
+    if (this.enemies.some((enemy) => enemy.alive)) {
+      this.waveGap = 0;
+      return;
+    }
+    if (this.wave >= WAVE_COUNT) return;
+    this.waveGap += dt;
+    if (this.waveGap >= WAVE_GAP) this.spawnWave(plane);
   }
 
   openSpawn(position, side) {
@@ -222,83 +272,48 @@ export class FlightCombat {
 
   steerEnemies(dt, plane) {
     const playerPos = plane.model.position;
-    const forward = new THREE.Vector3(
-      Math.sin(plane.heading),
-      0,
-      Math.cos(plane.heading),
-    );
-    const right = new THREE.Vector3(forward.z, 0, -forward.x);
+    const forward = this.waveForward;
+    const right = this.waveRight;
     for (const enemy of this.enemies) {
       if (!enemy.alive) continue;
-      enemy.phaseTime += dt;
-      let distance = enemy.position.distanceTo(playerPos);
-      // A mountain can leave a plane behind. Bring it back into the chase.
-      if (distance > 110) {
-        const rejoin = playerPos
-          .clone()
-          .addScaledVector(forward, -32 - enemy.index * 8)
-          .addScaledVector(right, enemy.side * 16);
-        rejoin.y = THREE.MathUtils.clamp(playerPos.y, 20, 58);
-        enemy.position.copy(this.openSpawn(rejoin, enemy.side));
-        enemy.heading = plane.heading;
-        enemy.phase = "approach";
-        enemy.phaseTime = 0;
-        enemy.cooldown = Math.max(enemy.cooldown, 1.1);
-        distance = enemy.position.distanceTo(playerPos);
+      enemy.age += dt;
+      const ahead = enemy.position.clone().sub(playerPos).dot(forward);
+      // Once a plane has flown past the nose, it leaves. It does not turn
+      // around and sit behind Skybird.
+      if (ahead < -18 || enemy.age > 14) {
+        this.retireEnemy(enemy);
+        continue;
       }
-      if (enemy.phase === "break") {
-        if (enemy.phaseTime > 2.2) {
-          enemy.phase = "approach";
-          enemy.phaseTime = 0;
-        }
-      } else if (distance < 14) {
-        enemy.phase = "break";
-        enemy.phaseTime = 0;
-      }
-      const goal = playerPos.clone();
-      if (enemy.phase === "break") {
-        goal
-          .addScaledVector(forward, -24)
-          .addScaledVector(right, enemy.side * 34);
-      } else {
-        goal
-          .addScaledVector(forward, 20)
-          .addScaledVector(right, enemy.side * 9);
-      }
-      goal.y = THREE.MathUtils.clamp(
-        playerPos.y + Math.sin(this.time * 0.7 + enemy.side) * 4,
+      const lane = playerPos
+        .clone()
+        .addScaledVector(forward, -28)
+        .addScaledVector(right, enemy.side * 12);
+      lane.y = THREE.MathUtils.clamp(
+        playerPos.y + enemy.side * 2,
         16,
         PLANE_MAX_ALTITUDE - 8,
       );
-      const toGoal = goal.clone().sub(enemy.position);
-      let desired = Math.atan2(toGoal.x, toGoal.z);
-      if (enemy.phase === "approach" && distance < 56 && distance > 12) {
-        const face = Math.atan2(
-          playerPos.x - enemy.position.x,
-          playerPos.z - enemy.position.z,
-        );
-        desired += angleDelta(desired, face) * 0.5;
-      }
-      enemy.heading += THREE.MathUtils.clamp(
-        angleDelta(enemy.heading, desired),
-        -1.5 * dt,
-        1.5 * dt,
+      const desired = Math.atan2(
+        lane.x - enemy.position.x,
+        lane.z - enemy.position.z,
       );
-      const speed = distance > 50 ? 33 : enemy.phase === "approach" ? 26 : 21;
+      const nextHeading =
+        enemy.heading +
+        THREE.MathUtils.clamp(
+          angleDelta(enemy.heading, desired),
+          -1.2 * dt,
+          1.2 * dt,
+        );
+      if (Math.abs(angleDelta(enemy.passHeading, nextHeading)) < 0.9)
+        enemy.heading = nextHeading;
       const next = enemy.position.clone();
-      next.x += Math.sin(enemy.heading) * speed * dt;
-      next.z += Math.cos(enemy.heading) * speed * dt;
-      next.y = THREE.MathUtils.damp(enemy.position.y, goal.y, 2.2, dt);
+      next.x += Math.sin(enemy.heading) * this.waveSpeed * dt;
+      next.z += Math.cos(enemy.heading) * this.waveSpeed * dt;
+      next.y = THREE.MathUtils.damp(enemy.position.y, lane.y, 2, dt);
       if (!blocked(next)) enemy.position.copy(next);
       else {
-        const slide = next.clone();
-        slide.x += enemy.side * 8;
+        const slide = next.clone().addScaledVector(right, enemy.side * 6);
         if (!blocked(slide)) enemy.position.copy(slide);
-        else
-          enemy.position.y = Math.min(
-            PLANE_MAX_ALTITUDE - 8,
-            enemy.position.y + 10 * dt,
-          );
       }
       enemy.position.x = THREE.MathUtils.clamp(
         enemy.position.x,
@@ -310,22 +325,14 @@ export class FlightCombat {
         PLANE_BOUNDS.minZ + 4,
         PLANE_BOUNDS.maxZ - 4,
       );
-      const away = enemy.position.clone().sub(playerPos);
-      const gap = away.length();
-      if (gap < 8 && gap > 0.001) {
-        away.setLength(8);
-        const pushed = playerPos.clone().add(away);
-        pushed.y = enemy.position.y;
-        if (!blocked(pushed)) enemy.position.copy(pushed);
-      }
       enemy.group.position.copy(enemy.position);
       enemy.group.rotation.set(
         0,
         enemy.heading,
-        Math.sin(this.time * 0.8 + enemy.side) * 0.1,
+        Math.sin(this.time * 0.8 + enemy.side) * 0.08,
       );
       for (const propeller of enemy.group.userData.propellers)
-        propeller.rotation.z -= dt * (14 + speed);
+        propeller.rotation.z -= dt * (14 + this.waveSpeed);
     }
   }
 
@@ -350,7 +357,7 @@ export class FlightCombat {
       if (!enemy.alive) continue;
       const toEnemy = enemy.position.clone().sub(plane.model.position);
       const distance = toEnemy.length();
-      if (distance < 6 || distance > 75) continue;
+      if (distance < 8 || distance > 120) continue;
       const dot = forward.dot(toEnemy.normalize());
       if (dot > bestDot) {
         bestDot = dot;
@@ -402,7 +409,7 @@ export class FlightCombat {
     direction.applyQuaternion(host.quaternion).normalize();
     if (aimAt && team === "player") {
       const toTarget = aimAt.clone().sub(muzzle).normalize();
-      direction.lerp(toTarget, 0.62).normalize();
+      direction.lerp(toTarget, 0.86).normalize();
     } else if (aimAt) {
       const toTarget = aimAt.clone().sub(muzzle).normalize();
       const side = new THREE.Vector3().crossVectors(toTarget, UP);
@@ -430,7 +437,7 @@ export class FlightCombat {
       previous: muzzle.clone(),
       direction,
       speed: team === "player" ? 72 : 46,
-      life: team === "player" ? 1.15 : 1.7,
+      life: team === "player" ? 1.65 : 1.7,
     });
   }
 
@@ -487,6 +494,10 @@ export class FlightCombat {
   }
 
   defeatEnemy(enemy) {
+    this.retireEnemy(enemy);
+  }
+
+  retireEnemy(enemy) {
     enemy.alive = false;
     enemy.group.visible = false;
   }
