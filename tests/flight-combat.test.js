@@ -64,7 +64,7 @@ test("enemies stay away until Skybird passes the first mountain", () => {
   const forward = new THREE.Vector3(0, 0, -1);
   for (const enemy of combat.enemies) {
     const ahead = enemy.position.clone().sub(plane.model.position).dot(forward);
-    assert.ok(ahead > 40, "enemy spawned behind Skybird");
+    assert.ok(ahead > 140, "enemy spawned too close to see them coming");
   }
 });
 
@@ -175,7 +175,7 @@ test("three waves of two planes come from the front and then stop", () => {
   let lastWave = 0;
   let campedBehind = false;
   const forward = new THREE.Vector3(0, 0, -1);
-  for (let t = 0; t < 45; t += step) {
+  for (let t = 0; t < 55; t += step) {
     combat.update(step, plane);
     if (combat.wave !== lastWave) {
       lastWave = combat.wave;
@@ -205,6 +205,32 @@ test("three waves of two planes come from the front and then stop", () => {
   assert.equal(combat.wave, WAVE_COUNT);
 });
 
+test("shooting a plane down leaves a burst", () => {
+  const parent = new THREE.Group();
+  const combat = new FlightCombat(parent);
+  const plane = fakePlane(-22, 48, -700);
+  combat.update(1 / 60, plane);
+  const enemy = combat.enemies[0];
+  enemy.health = 1;
+  const mesh = new THREE.Mesh();
+  parent.add(mesh);
+  combat.bullets.push({
+    team: "player",
+    mesh,
+    position: enemy.position.clone(),
+    previous: enemy.position.clone(),
+    direction: new THREE.Vector3(),
+    speed: 0,
+    life: 1,
+  });
+  combat.update(1 / 60, plane);
+  assert.equal(enemy.alive, false);
+  assert.equal(combat.bursts.length, 1);
+  assert.equal(combat.bursts[0].pieces.length, 9);
+  combat.update(1, plane);
+  assert.equal(combat.bursts.length, 0);
+});
+
 test("flying toward the incoming planes can shoot one down", () => {
   const combat = new FlightCombat(new THREE.Group());
   const plane = fakePlane(-22, 48, -700);
@@ -224,7 +250,7 @@ test("flying toward the incoming planes can shoot one down", () => {
 
 test("standing still draws enemy fire without a quick shoot-down", () => {
   const combat = new FlightCombat(new THREE.Group());
-  const plane = fakePlane(-22, 48, -700);
+  const plane = fakePlane(-25, 55, -640);
   plane.speed = 0;
   const step = 1 / 30;
   for (let t = 0; t < 25; t += step) {

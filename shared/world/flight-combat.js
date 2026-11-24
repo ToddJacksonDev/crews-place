@@ -84,7 +84,7 @@ function makeEnemyPlane() {
   }
   plane.userData.propellers = propellers;
   plane.userData.gunMounts = gunMounts;
-  plane.scale.setScalar(0.86);
+  plane.scale.setScalar(1.25);
   return plane;
 }
 
@@ -119,6 +119,8 @@ export class FlightCombat {
     );
     this.hitGlow.visible = false;
     parent.add(this.hitGlow);
+    this.bursts = [];
+    this.burstGeometry = new THREE.SphereGeometry(1.65, 10, 8);
     this.enemies = [0, 1].map((index) => {
       const group = makeEnemyPlane();
       group.visible = false;
@@ -146,11 +148,13 @@ export class FlightCombat {
     this.gunTimer = 0;
     this.hideEnemies();
     this.clearBullets();
+    this.clearBursts();
     this.hitGlow.visible = false;
   }
 
   update(dt, plane) {
     this.time += dt;
+    this.updateBursts(dt);
     const result = { warning: false, escaped: false, shotDown: false };
     const position = plane.model.position;
     if (this.state === "escaped") {
@@ -210,26 +214,13 @@ export class FlightCombat {
     this.waveSpeed = Math.max(10, 26 - Math.max(0, plane.speed ?? 0));
     const passHeading = Math.atan2(-forward.x, -forward.z);
     for (const enemy of this.enemies) {
-      const lateral = enemy.side * 11;
-      const distance = 100 + enemy.index * 22;
-      let spot = null;
-      for (let step = 0; step < 5; step++) {
-        const candidate = plane.model.position
-          .clone()
-          .addScaledVector(forward, distance - step * 10)
-          .addScaledVector(right, lateral);
-        candidate.y = THREE.MathUtils.clamp(
-          plane.model.position.y + enemy.side * 3,
-          20,
-          60,
-        );
-        const clear = this.openSpawn(candidate, enemy.side);
-        if (!blocked(clear)) {
-          spot = clear;
-          break;
-        }
-      }
-      spot ??= plane.model.position.clone().addScaledVector(forward, 64);
+      const spot = this.spawnAhead(
+        plane.model.position,
+        forward,
+        right,
+        enemy,
+        enemy.index === 0 ? 156 : 190,
+      );
       enemy.position.copy(spot);
       enemy.heading = passHeading;
       enemy.passHeading = passHeading;
@@ -253,6 +244,47 @@ export class FlightCombat {
     if (this.wave >= WAVE_COUNT) return;
     this.waveGap += dt;
     if (this.waveGap >= WAVE_GAP) this.spawnWave(plane);
+  }
+
+  // Far enough to come out of the northern haze, but only along open sky.
+  // A peak in front pulls the pair sideways into the pass instead of hiding
+  // them behind the mountain.
+  spawnAhead(origin, forward, right, enemy, wanted) {
+    const laterals = [enemy.side * 11, enemy.side * 22, enemy.side * 36];
+    for (let distance = wanted; distance >= 84; distance -= 14) {
+      for (const lateral of laterals) {
+        const candidate = origin
+          .clone()
+          .addScaledVector(forward, distance)
+          .addScaledVector(right, lateral);
+        candidate.y = THREE.MathUtils.clamp(origin.y + enemy.side * 3, 22, 64);
+        const clear = this.openSpawn(candidate, enemy.side);
+        if (Math.abs(clear.x) > 78) continue;
+        const ahead = clear.clone().sub(origin).dot(forward);
+        if (ahead < 70) continue;
+        const gate = origin
+          .clone()
+          .addScaledVector(forward, 36)
+          .addScaledVector(right, Math.sign(lateral) * 12);
+        gate.y = clear.y;
+        if (blocked(clear) || !this.laneClear(origin, clear)) continue;
+        if (!this.laneClear(clear, gate)) continue;
+        return clear;
+      }
+    }
+    const fallback = origin
+      .clone()
+      .addScaledVector(forward, 84)
+      .addScaledVector(right, enemy.side * 11);
+    fallback.y = THREE.MathUtils.clamp(origin.y, 22, 64);
+    return this.openSpawn(fallback, enemy.side);
+  }
+
+  laneClear(from, to) {
+    for (let step = 1; step <= 8; step++) {
+      if (blocked(from.clone().lerp(to, step / 8))) return false;
+    }
+    return true;
   }
 
   openSpawn(position, side) {
@@ -280,7 +312,7 @@ export class FlightCombat {
       const ahead = enemy.position.clone().sub(playerPos).dot(forward);
       // Once a plane has flown past the nose, it leaves. It does not turn
       // around and sit behind Skybird.
-      if (ahead < -18 || enemy.age > 14) {
+      if (ahead < -18 || enemy.age > 32) {
         this.retireEnemy(enemy);
         continue;
       }
@@ -357,7 +389,7 @@ export class FlightCombat {
       if (!enemy.alive) continue;
       const toEnemy = enemy.position.clone().sub(plane.model.position);
       const distance = toEnemy.length();
-      if (distance < 8 || distance > 120) continue;
+      if (distance < 8 || distance > 220) continue;
       const dot = forward.dot(toEnemy.normalize());
       if (dot > bestDot) {
         bestDot = dot;
@@ -437,7 +469,7 @@ export class FlightCombat {
       previous: muzzle.clone(),
       direction,
       speed: team === "player" ? 72 : 46,
-      life: team === "player" ? 1.65 : 1.7,
+      life: team === "player" ? 3.1 : 1.7,
     });
   }
 
@@ -494,7 +526,61 @@ export class FlightCombat {
   }
 
   defeatEnemy(enemy) {
+    this.explode(enemy.position);
     this.retireEnemy(enemy);
+  }
+
+  explode(position) {
+    const colors = [0xfff0a8, 0xff9a3c, 0xff5c6a];
+    const pieces = [];
+    for (let i = 0; i < 9; i++) {
+      const material = new THREE.MeshBasicMaterial({
+        color: colors[i % colors.length],
+        transparent: true,
+        opacity: 1,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.burstGeometry, material);
+      mesh.castShadow = false;
+      const dir = new THREE.Vector3(
+        Math.sin(i * 1.4),
+        0.3 + (i % 3) * 0.28,
+        Math.cos(i * 1.4),
+      ).normalize();
+      mesh.position.copy(position);
+      mesh.scale.setScalar(2.2);
+      this.parent.add(mesh);
+      pieces.push({ mesh, material, dir, speed: 14 + (i % 4) * 4 });
+    }
+    this.bursts.push({ pieces, life: 1, duration: 1 });
+  }
+
+  updateBursts(dt) {
+    for (let i = this.bursts.length - 1; i >= 0; i--) {
+      const burst = this.bursts[i];
+      burst.life -= dt;
+      const fade = Math.max(0, burst.life / burst.duration);
+      for (const piece of burst.pieces) {
+        piece.mesh.position.addScaledVector(piece.dir, piece.speed * dt);
+        piece.mesh.scale.setScalar(2.2 + (1 - fade) * 2.4);
+        piece.material.opacity = fade;
+        if (burst.life <= 0) {
+          piece.mesh.removeFromParent();
+          piece.material.dispose();
+        }
+      }
+      if (burst.life <= 0) this.bursts.splice(i, 1);
+    }
+  }
+
+  clearBursts() {
+    for (const burst of this.bursts) {
+      for (const piece of burst.pieces) {
+        piece.mesh.removeFromParent();
+        piece.material.dispose();
+      }
+    }
+    this.bursts.length = 0;
   }
 
   retireEnemy(enemy) {
